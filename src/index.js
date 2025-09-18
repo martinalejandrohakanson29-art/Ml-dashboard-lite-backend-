@@ -158,20 +158,23 @@ app.get('/visits/daily', requireAuth, async (req, res) => {
   }
 })
 
-// Snapshot de stock Full (para una fecha)
+// Stock FULL por fecha (usa la vista v_full_stock_by_date)
 app.get('/stock/full', requireAuth, async (req, res) => {
   try {
-    const date = req.query.date || new Date().toISOString().slice(0,10)
+    const date = String(req.query.date || '').slice(0,10) // YYYY-MM-DD
+    if (!date) return res.status(400).json({ error: 'missing date' })
+
     const { data, error } = await supabase
-      .from('full_stock_min')
-      .select('*')
+      .from('v_full_stock_by_date')
+      .select('inventory_id,item_id,title,qty,date')
       .eq('date', date)
-      .limit(10000)
+      .order('item_id', { ascending: true })
+
     if (error) throw error
     res.json({ date, count: data?.length || 0, rows: data || [] })
   } catch (err) {
     console.error('Error /stock/full:', err)
-    res.status(500).json({ error: 'stock error' })
+    res.status(500).json({ error: 'stock error', detail: String(err?.message || err) })
   }
 })
 
