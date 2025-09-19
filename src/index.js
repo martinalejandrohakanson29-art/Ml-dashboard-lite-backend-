@@ -184,41 +184,43 @@ app.get('/stock/full', requireAuth, async (req, res) => {
 })
 
 
-// --- Full – Decisiones (V2: stock + ventas/visitas + cálculos de cobertura/semáforo)
+
+
+
+
+// --- Full – Decisiones (V3: suma semáforo de almacenamiento)
 app.get('/full/decisions', requireAuth, async (req, res) => {
   try {
     const windowDays  = parseInt(req.query.window ?? '30', 10);      // 30 o 60
     const leadTime    = parseInt(req.query.lead_time ?? '7', 10);    // días de reposición
-    const storageDays = parseInt(req.query.storage_days ?? '60', 10); // (se usa en V3)
-    const nearMargin  = parseInt(req.query.near_margin ?? '15', 10);  // (se usa en V3)
+    const storageDays = parseInt(req.query.storage_days ?? '60', 10);
+    const nearMargin  = parseInt(req.query.near_margin ?? '15', 10); // “cerca” = 60-15 = 45
 
-    // Fechas (usamos día "cerrado" para evitar horas)
+    // Fechas (día cerrado)
     const now = new Date();
     const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
     const fromDate = new Date(tomorrow.getTime() - windowDays * 24 * 60 * 60 * 1000);
-    const fromStr = fromDate.toISOString().slice(0, 10); // YYYY-MM-DD
-    const toStr   = tomorrow.toISOString().slice(0, 10);  // YYYY-MM-DD
+    const fromStr = fromDate.toISOString().slice(0, 10);
+    const toStr   = tomorrow.toISOString().slice(0, 10);
 
-    // 1) Stock FULL por item
+    // 1) Stock FULL
     const { data: stockRows, error: stockErr } = await supabase
       .from('full_stock_min')
       .select('item_id,title,available_quantity,total,updated_at');
-
     if (stockErr) throw stockErr;
 
-    // 2) Visitas últimos N días (sumamos en Node por si hay distintas estructuras)
+    // 2) Visitas (filtramos en Node)
     const { data: vRows, error: vErr } = await supabase
       .from('visits_raw')
       .select('item_id, visits, date');
     if (vErr) throw vErr;
 
-    // 3) Ventas últimos N días + última venta (traemos campos comunes y filtramos en Node)
+    // 3) Ventas (sumatoria + última venta)
     const { data: sRows, error: sErr } = await supabase
       .from('sales_raw')
       .select('item_id, quantity, date, created_at');
     if (sErr) throw sErr;
 
-    // Armar índices en memoria
     const fromMs = new Date(fromStr).getTime();
     const toMs   = new Date(toStr).getTime();
 
@@ -241,16 +243,12 @@ app.get('/full/decisions', requireAuth, async (req, res) => {
       const whenStr = r?.date || r?.created_at || null;
       const when = whenStr ? new Date(whenStr).getTime() : null;
 
-      // cantidad: si no hay 'quantity', contamos 1 por fila
       const qRaw = r?.quantity;
       const q = Number.isFinite(Number(qRaw)) && Number(qRaw) > 0 ? Number(qRaw) : 1;
 
-      // ventas dentro de ventana
       if (when !== null && when >= fromMs && when < toMs) {
         salesByItem[k] = (salesByItem[k] || 0) + q;
       }
-
-      // última venta (sin limitar por ventana)
       if (when !== null) {
         if (!lastSaleTsByItem[k] || when > lastSaleTsByItem[k]) {
           lastSaleTsByItem[k] = when;
@@ -258,7 +256,6 @@ app.get('/full/decisions', requireAuth, async (req, res) => {
       }
     });
 
-    // 4) Construir respuesta con cálculos
     const items = (stockRows || []).map(r => {
       const itemId = String(r?.item_id || '');
       const title  = r?.title || '';
@@ -273,7 +270,6 @@ app.get('/full/decisions', requireAuth, async (req, res) => {
       let days_coverage = null;
       let break_date = null;
       let stock_flag = 'ok'; // 'risk' | 'warn' | 'ok'
-
       if (demanda_diaria > 0) {
         days_coverage = stock / demanda_diaria;
         if (days_coverage <= leadTime) {
@@ -285,21 +281,34 @@ app.get('/full/decisions', requireAuth, async (req, res) => {
         }
         const breakMs = Date.now() + Math.floor(days_coverage) * 24 * 60 * 60 * 1000;
         break_date = new Date(breakMs).toISOString().slice(0, 10);
-      } else {
-        // sin demanda → cobertura infinita, lo tratamos como ok
-        stock_flag = 'ok';
       }
 
-      const targetStock = 2 * leadTime * demanda_diaria; // objetivo: 2× lead time
-      const suggested_send = Math.max(0, Math.ceil(targetStock - stock));
-
-      // placeholders para Paso 3 (almacenamiento)
+      // almacenamiento: días desde última venta
       const lastSaleTs = lastSaleTsByItem[itemId] || null;
       const last_sale_date = lastSaleTs ? new Date(lastSaleTs).toISOString() : null;
       const days_since_last_sale = lastSaleTs
         ? Math.floor((Date.now() - lastSaleTs) / (24 * 60 * 60 * 1000))
         : null;
-      const storage_flag = 'ok'; // se calculará en V3 con storageDays/nearMargin
+
+      let storage_flag = 'ok'; // 'risk' | 'near' | 'ok'
+      if (days_since_last_sale !== null) {
+        if (days_since_last_sale >= storageDays) {
+          storage_flag = 'risk';
+        } else if (days_since_last_sale >= Math.max(0, storageDays - nearMargin)) {
+          storage_flag = 'near';
+        }
+      } // si no hay historial de ventas, lo dejamos 'ok'
+
+      // bandera combinada para ordenar/filtrar fácil en el front
+      let overall_flag = 'ok'; // 'risk' | 'warn' | 'ok'
+      if (storage_flag === 'risk' || stock_flag === 'risk') {
+        overall_flag = 'risk';
+      } else if (stock_flag === 'warn' || storage_flag === 'near') {
+        overall_flag = 'warn';
+      }
+
+      const targetStock = 2 * leadTime * demanda_diaria; // objetivo: 2× lead time
+      const suggested_send = Math.max(0, Math.ceil(targetStock - stock));
 
       return {
         item_id: itemId,
@@ -307,14 +316,15 @@ app.get('/full/decisions', requireAuth, async (req, res) => {
         stock_full: stock,
         ventas_nd,
         visitas_nd,
-        conv_nd,               // 0–1 (el front muestra %)
+        conv_nd,               // 0–1 (mostrás % en el front)
         demanda_diaria,
-        days_coverage,         // null = “∞” en el front
+        days_coverage,         // null = “∞”
         break_date,
         last_sale_date,
         days_since_last_sale,
-        stock_flag,            // semáforo de stock (ya listo)
-        storage_flag,          // (se implementa en V3)
+        stock_flag,            // semáforo de stock
+        storage_flag,          // semáforo de almacenamiento (rojo/near/ok)
+        overall_flag,          // combinado para ordenar/filtrar simple
         suggested_send,
         window: windowDays,
         lead_time: leadTime,
@@ -329,6 +339,8 @@ app.get('/full/decisions', requireAuth, async (req, res) => {
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
+
+
 
 
 
