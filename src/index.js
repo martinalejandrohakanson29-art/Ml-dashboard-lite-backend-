@@ -158,25 +158,32 @@ app.get('/visits/daily', requireAuth, async (req, res) => {
   }
 })
 
-// Stock FULL por fecha (usa la vista v_full_stock_by_date)
+// Stock FULL actual (sin fecha): lee la tabla "full_stock_min"
 app.get('/stock/full', requireAuth, async (req, res) => {
   try {
-    const date = String(req.query.date || '').slice(0,10) // YYYY-MM-DD
-    if (!date) return res.status(400).json({ error: 'missing date' })
-
     const { data, error } = await supabase
-      .from('v_full_stock_by_date')
-      .select('inventory_id,item_id,title,qty,date')
-      .eq('date', date)
-      .order('item_id', { ascending: true })
+      .from('full_stock_min')
+      .select('inventory_id,item_id,title,available_quantity,total,updated_at,created_at')
+      .limit(100000)
 
     if (error) throw error
-    res.json({ date, count: data?.length || 0, rows: data || [] })
+
+    const rows = (data || []).map(r => ({
+      inventory_id: r.inventory_id,
+      item_id:      r.item_id,
+      title:        r.title,
+      qty:          (r.available_quantity ?? r.total ?? 0),
+      // dejamos "date" en null para que el front no dependa de esto
+      date:        null
+    }))
+
+    res.json({ count: rows.length, rows })
   } catch (err) {
     console.error('Error /stock/full:', err)
     res.status(500).json({ error: 'stock error', detail: String(err?.message || err) })
   }
 })
+
 
 // Test conexión a Supabase
 app.get('/ping-supa', requireAuth, async (req, res) => {
