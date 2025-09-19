@@ -184,70 +184,152 @@ app.get('/stock/full', requireAuth, async (req, res) => {
 })
 
 
-// --- Full – Decisiones (v1: solo stock, listo para sumar ventas/visitas en Paso 2)
+// --- Full – Decisiones (V2: stock + ventas/visitas + cálculos de cobertura/semáforo)
 app.get('/full/decisions', requireAuth, async (req, res) => {
   try {
-    const windowDays   = parseInt(req.query.window ?? '30', 10);     // 30 o 60
-    const leadTime     = parseInt(req.query.lead_time ?? '7', 10);   // días de reposición
-    const storageDays  = parseInt(req.query.storage_days ?? '60', 10); // ML cobra a los 60 días sin ventas
-    const nearMargin   = parseInt(req.query.near_margin ?? '15', 10);  // “cerca” = 60-15 = 45 días
+    const windowDays  = parseInt(req.query.window ?? '30', 10);      // 30 o 60
+    const leadTime    = parseInt(req.query.lead_time ?? '7', 10);    // días de reposición
+    const storageDays = parseInt(req.query.storage_days ?? '60', 10); // (se usa en V3)
+    const nearMargin  = parseInt(req.query.near_margin ?? '15', 10);  // (se usa en V3)
 
-    // 1) Traer stock FULL por item
-    const { data: stockRows, error } = await supabase
+    // Fechas (usamos día "cerrado" para evitar horas)
+    const now = new Date();
+    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+    const fromDate = new Date(tomorrow.getTime() - windowDays * 24 * 60 * 60 * 1000);
+    const fromStr = fromDate.toISOString().slice(0, 10); // YYYY-MM-DD
+    const toStr   = tomorrow.toISOString().slice(0, 10);  // YYYY-MM-DD
+
+    // 1) Stock FULL por item
+    const { data: stockRows, error: stockErr } = await supabase
       .from('full_stock_min')
       .select('item_id,title,available_quantity,total,updated_at');
 
-    if (error) throw error;
+    if (stockErr) throw stockErr;
 
-    // 2) Formar respuesta (v1: ventas/visitas se agregan en el Paso 2)
+    // 2) Visitas últimos N días (sumamos en Node por si hay distintas estructuras)
+    const { data: vRows, error: vErr } = await supabase
+      .from('visits_raw')
+      .select('item_id, visits, date');
+    if (vErr) throw vErr;
+
+    // 3) Ventas últimos N días + última venta (traemos campos comunes y filtramos en Node)
+    const { data: sRows, error: sErr } = await supabase
+      .from('sales_raw')
+      .select('item_id, quantity, date, created_at');
+    if (sErr) throw sErr;
+
+    // Armar índices en memoria
+    const fromMs = new Date(fromStr).getTime();
+    const toMs   = new Date(toStr).getTime();
+
+    const visitsByItem = {};
+    (vRows || []).forEach(r => {
+      const k = String(r?.item_id ?? '');
+      const d = r?.date ? new Date(r.date).getTime() : null;
+      const n = Number(r?.visits ?? 0);
+      if (!k) return;
+      if (d !== null && d >= fromMs && d < toMs) {
+        visitsByItem[k] = (visitsByItem[k] || 0) + (Number.isFinite(n) ? n : 0);
+      }
+    });
+
+    const salesByItem = {};
+    const lastSaleTsByItem = {};
+    (sRows || []).forEach(r => {
+      const k = String(r?.item_id ?? '');
+      if (!k) return;
+      const whenStr = r?.date || r?.created_at || null;
+      const when = whenStr ? new Date(whenStr).getTime() : null;
+
+      // cantidad: si no hay 'quantity', contamos 1 por fila
+      const qRaw = r?.quantity;
+      const q = Number.isFinite(Number(qRaw)) && Number(qRaw) > 0 ? Number(qRaw) : 1;
+
+      // ventas dentro de ventana
+      if (when !== null && when >= fromMs && when < toMs) {
+        salesByItem[k] = (salesByItem[k] || 0) + q;
+      }
+
+      // última venta (sin limitar por ventana)
+      if (when !== null) {
+        if (!lastSaleTsByItem[k] || when > lastSaleTsByItem[k]) {
+          lastSaleTsByItem[k] = when;
+        }
+      }
+    });
+
+    // 4) Construir respuesta con cálculos
     const items = (stockRows || []).map(r => {
-      const stock = Number(r?.available_quantity ?? r?.total ?? 0) || 0;
+      const itemId = String(r?.item_id || '');
+      const title  = r?.title || '';
+      const stock  = Number(r?.available_quantity ?? r?.total ?? 0) || 0;
 
-      // placeholders (se completan en el Paso 2)
-      const ventas_nd = 0;
-      const visitas_nd = 0;
-      const conv_nd = 0;                 // 0–1 (el front mostrará %)
-      const demanda_diaria = 0;          // ventas_nd / windowDays
-      const days_coverage = null;        // con demanda 0 mostramos "∞" en el front
-      const break_date = null;
+      const ventas_nd  = Number(salesByItem[itemId] || 0);
+      const visitas_nd = Number(visitsByItem[itemId] || 0);
+      const conv_nd    = visitas_nd > 0 ? (ventas_nd / visitas_nd) : 0;
 
-      // semáforos (provisorios: sin demanda es "ok" para stock; storage lo sumamos en Paso 3)
-      const stock_flag = 'ok';           // 'risk' | 'warn' | 'ok'
-      const last_sale_date = null;       // Paso 3
-      const days_since_last_sale = null; // Paso 3
-      const storage_flag = 'ok';         // 'risk' | 'near' | 'ok' (Paso 3)
+      const demanda_diaria = ventas_nd > 0 ? (ventas_nd / windowDays) : 0;
 
-      const suggested_send = 0;          // Paso 2 (cuando tengamos demanda)
+      let days_coverage = null;
+      let break_date = null;
+      let stock_flag = 'ok'; // 'risk' | 'warn' | 'ok'
+
+      if (demanda_diaria > 0) {
+        days_coverage = stock / demanda_diaria;
+        if (days_coverage <= leadTime) {
+          stock_flag = 'risk';
+        } else if (days_coverage <= 2 * leadTime) {
+          stock_flag = 'warn';
+        } else {
+          stock_flag = 'ok';
+        }
+        const breakMs = Date.now() + Math.floor(days_coverage) * 24 * 60 * 60 * 1000;
+        break_date = new Date(breakMs).toISOString().slice(0, 10);
+      } else {
+        // sin demanda → cobertura infinita, lo tratamos como ok
+        stock_flag = 'ok';
+      }
+
+      const targetStock = 2 * leadTime * demanda_diaria; // objetivo: 2× lead time
+      const suggested_send = Math.max(0, Math.ceil(targetStock - stock));
+
+      // placeholders para Paso 3 (almacenamiento)
+      const lastSaleTs = lastSaleTsByItem[itemId] || null;
+      const last_sale_date = lastSaleTs ? new Date(lastSaleTs).toISOString() : null;
+      const days_since_last_sale = lastSaleTs
+        ? Math.floor((Date.now() - lastSaleTs) / (24 * 60 * 60 * 1000))
+        : null;
+      const storage_flag = 'ok'; // se calculará en V3 con storageDays/nearMargin
 
       return {
-        item_id: String(r.item_id || ''),
-        title: r.title || '',
+        item_id: itemId,
+        title,
         stock_full: stock,
         ventas_nd,
         visitas_nd,
-        conv_nd,
+        conv_nd,               // 0–1 (el front muestra %)
         demanda_diaria,
-        days_coverage,
+        days_coverage,         // null = “∞” en el front
         break_date,
         last_sale_date,
         days_since_last_sale,
-        stock_flag,
-        storage_flag,
+        stock_flag,            // semáforo de stock (ya listo)
+        storage_flag,          // (se implementa en V3)
         suggested_send,
-        // eco de parámetros para facilitar debug en el front
         window: windowDays,
         lead_time: leadTime,
         storage_days: storageDays,
         near_margin: nearMargin,
-        updated_at: r.updated_at || null,
+        updated_at: r?.updated_at || null,
       };
     });
 
-    res.json({ ok: true, count: items.length, items });
+    res.json({ ok: true, count: items.length, items, from: fromStr, to: toStr });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
+
 
 
 
