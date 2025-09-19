@@ -29,7 +29,12 @@ function parseDateToMs(s) {
   return null; // no reconocida
 }
 
-
+// Prioriza 'orders' (ventas del día). Si no hay, usa 'quantity'. Si no, 0.
+function getSalesQty(row) {
+  const raw = row?.orders ?? row?.quantity ?? row?.qty ?? row?.units ?? row?.count ?? 0;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
 
 
 // CORS (habilitamos Authorization)
@@ -125,10 +130,11 @@ app.get('/full/decisions', async (req, res) => {
     if (vErr) throw vErr;
 
     // 3) Ventas (sumar dentro de ventana; defensivo con cantidad)
-    const { data: sRows, error: sErr } = await supabase
-      .from('sales_raw')
-      .select('*'); // ¡no referenciamos columnas que quizás no existen!
-    if (sErr) throw sErr;
+   const { data: sRows, error: sErr } = await supabase
+  .from('sales_raw')
+  .select('item_id,date,orders,quantity,ingested_at');
+if (sErr) throw sErr;
+
 
     // --- Mapas auxiliares
     const stockByItem = {};   // item_id -> {stock, title, inventory_id}
