@@ -136,18 +136,29 @@ app.get('/full/decisions', requireAuth, async (req, res) => {
 if (sErr) throw sErr;
 
 
-    // --- Mapas auxiliares
-    const stockByItem = {};   // item_id -> {stock, title, inventory_id}
-    for (const r of fRows || []) {
-      const itemId = String(r?.item_id ?? r?.ml_item_id ?? r?.ml_id ?? '').trim();
-      if (!itemId) continue;
-      const qty = Number(r?.qty ?? r?.available_quantity ?? r?.available ?? r?.total ?? 0);
-      stockByItem[itemId] = {
-        stock: Number.isFinite(qty) ? qty : 0,
-        title: String(r?.title ?? r?.item_title ?? r?.name ?? ''),
-        inventory_id: String(r?.inventory_id ?? r?.inventoryId ?? '')
-      };
-    }
+   // stockByItem (reemplazá el bloque actual)
+const stockByItem = {};
+for (const r of fRows || []) {
+  const itemId = String(r?.item_id ?? r?.ml_item_id ?? r?.ml_id ?? '').trim();
+  if (!itemId) continue;
+
+  const qtyRaw =
+    r?.total ??              // ← primero 'total'
+    r?.qty ??
+    r?.available_quantity ??
+    r?.available ??
+    r?.stock ??
+    r?.available_stock ??
+    r?.quantity ?? 0;
+
+  const qty = Number(qtyRaw);
+  stockByItem[itemId] = {
+    stock: Number.isFinite(qty) && qty >= 0 ? qty : 0,
+    title: String(r?.title ?? r?.item_title ?? r?.name ?? ''),
+    inventory_id: String(r?.inventory_id ?? r?.inventoryId ?? '')
+  };
+}
+
 
     const visitsByItem = {};  // item_id -> total visitas en ventana
     for (const r of vRows || []) {
