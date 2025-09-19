@@ -158,7 +158,7 @@ app.get('/visits/daily', requireAuth, async (req, res) => {
   }
 })
 
-// Stock FULL actual (sin fecha): lee la tabla "full_stock_min"
+// Stock FULL actual (SIN fecha): lee full_stock_min y NO usa 'date'
 app.get('/stock/full', requireAuth, async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -169,20 +169,20 @@ app.get('/stock/full', requireAuth, async (req, res) => {
     if (error) throw error
 
     const rows = (data || []).map(r => ({
-      inventory_id: r.inventory_id,
-      item_id:      r.item_id,
-      title:        r.title,
-      qty:          (r.available_quantity ?? r.total ?? 0),
-      // dejamos "date" en null para que el front no dependa de esto
-      date:        null
+      inventory_id: String(r.inventory_id ?? ''),
+      item_id:      String(r.item_id ?? ''),
+      title:        String(r.title ?? ''),
+      qty:          Number(r.available_quantity ?? r.total ?? 0),
+      date:         null // opcional: dejamos null explícito, así jamás rompe
     }))
 
-    res.json({ count: rows.length, rows })
+    return res.json({ count: rows.length, rows })
   } catch (err) {
     console.error('Error /stock/full:', err)
-    res.status(500).json({ error: 'stock error', detail: String(err?.message || err) })
+    return res.status(500).json({ error: 'stock error', detail: String(err?.message || err) })
   }
 })
+
 
 
 // Test conexión a Supabase
