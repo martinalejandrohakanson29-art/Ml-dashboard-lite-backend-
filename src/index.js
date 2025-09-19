@@ -110,30 +110,28 @@ app.get('/full/decisions', requireAuth, async (req, res) => {
     const windowDays = Math.max(1, parseInt(String(req.query.window || '30'), 10));
     const leadDays   = Math.max(1, parseInt(String(req.query.lead_time || '7'), 10));
 
-    const nowMs  = Date.now();
-    const toMs   = nowMs;                                  // hoy
-    const fromMs = nowMs - windowDays * 24 * 60 * 60 * 1000; // hoy - ventana
+  // usar la función ya definida
+const { fromStr, toStr, fromMs, toMs } = windowRange(windowDays);
 
-    const toStr   = new Date(toMs).toISOString().slice(0,10);
-    const fromStr = new Date(fromMs).toISOString().slice(0,10);
 
-    // 1) Stock FULL (base de items que evaluamos)
-    const { data: fRows, error: fErr } = await supabase
-      .from('full_stock_min')
-      .select('*');
-    if (fErr) throw fErr;
+  // 1) Stock FULL
+const { data: fRows, error: fErr } = await supabase
+  .from('full_stock_min')
+  .select('*');
+if (fErr) throw fErr;
 
-    // 2) Visitas (sumar dentro de ventana)
-    const { data: vRows, error: vErr } = await supabase
-      .from('visits_raw').select('item_id,date,visits')
-      .select('*');
-    if (vErr) throw vErr;
+// 2) Visitas (solo lo necesario)  ✅ sin segundo .select
+const { data: vRows, error: vErr } = await supabase
+  .from('visits_raw')
+  .select('item_id,date,visits');
+if (vErr) throw vErr;
 
-    // 3) Ventas (sumar dentro de ventana; defensivo con cantidad)
-   const { data: sRows, error: sErr } = await supabase
-  .from('sales_raw').select('item_id,date,orders,quantity')
-  .select('item_id,date,orders,quantity,ingested_at');
+// 3) Ventas (schema puede variar → trae todo y usamos getSalesQty)
+const { data: sRows, error: sErr } = await supabase
+  .from('sales_raw')
+  .select('*');
 if (sErr) throw sErr;
+
 
 
    // stockByItem (reemplazá el bloque actual)
@@ -142,21 +140,21 @@ for (const r of fRows || []) {
   const itemId = String(r?.item_id ?? r?.ml_item_id ?? r?.ml_id ?? '').trim();
   if (!itemId) continue;
 
-  const qtyRaw =
-    r?.total ??              // ← primero 'total'
-    r?.qty ??
-    r?.available_quantity ??
-    r?.available ??
-    r?.stock ??
-    r?.available_stock ??
-    r?.quantity ?? 0;
+ const qtyRaw =
+  r?.total ??                  // ← primero 'total'
+  r?.qty ??
+  r?.available_quantity ??
+  r?.available ??
+  r?.stock ??
+  r?.available_stock ??
+  r?.quantity ?? 0;
 
-  const qty = Number(qtyRaw);
-  stockByItem[itemId] = {
-    stock: Number.isFinite(qty) && qty >= 0 ? qty : 0,
-    title: String(r?.title ?? r?.item_title ?? r?.name ?? ''),
-    inventory_id: String(r?.inventory_id ?? r?.inventoryId ?? '')
-  };
+const qty = Number(qtyRaw);
+stockByItem[itemId] = {
+  stock: Number.isFinite(qty) && qty >= 0 ? qty : 0,
+  title: String(r?.title ?? r?.item_title ?? r?.name ?? ''),
+  inventory_id: String(r?.inventory_id ?? r?.inventoryId ?? '')
+};
 }
 
 
@@ -223,6 +221,39 @@ for (const r of fRows || []) {
       return ax - bx;
     });
 
+/* ===== DEBUG OPCIONAL ===== */
+if (String(req.query.debug || '') === '1') {
+  const allDatesV = (vRows || [])
+    .map(r => parseDateToMs(r?.date || r?.created_at || null))
+    .filter(t => t !== null)
+    .sort((a,b) => a-b);
+
+  const allDatesS = (sRows || [])
+    .map(r => parseDateToMs(r?.date || r?.created_at || null))
+    .filter(t => t !== null)
+    .sort((a,b) => a-b);
+
+  return res.json({
+    ok: true,
+    window: { from: fromStr, to: toStr },
+    counts: {
+      full_stock_min_rows: fRows?.length || 0,
+      visits_rows: vRows?.length || 0,
+      sales_rows: sRows?.length || 0,
+      items_stock: Object.keys(stockByItem).length,
+      items_visits: Object.keys(visitsByItem).length,
+      items_sales: Object.keys(salesByItem).length,
+    },
+    dates: {
+      visits_min: allDatesV[0] ? new Date(allDatesV[0]).toISOString().slice(0,10) : null,
+      visits_max: allDatesV.at(-1) ? new Date(allDatesV.at(-1)).toISOString().slice(0,10) : null,
+      sales_min: allDatesS[0] ? new Date(allDatesS[0]).toISOString().slice(0,10) : null,
+      sales_max: allDatesS.at(-1) ? new Date(allDatesS.at(-1)).toISOString().slice(0,10) : null,
+    },
+  });
+}
+
+    
     res.json({ ok: true, count: items.length, items, from: fromStr, to: toStr });
   } catch (err) {
     console.error('Error /full/decisions:', err);
