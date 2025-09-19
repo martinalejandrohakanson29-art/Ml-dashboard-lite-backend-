@@ -1,55 +1,55 @@
-// src/index.js
+// back.js — versión mínima funcional
 import express from 'express'
 import cors from 'cors'
 import morgan from 'morgan'
 import 'dotenv/config'
 import { createClient } from '@supabase/supabase-js'
 
-// --- Config ---
 const PORT = process.env.PORT || 3000
 const API_SECRET = process.env.API_SECRET
 const SUPABASE_URL = process.env.SUPABASE_URL
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
 
-// Chequeo de envs con log claro (sin exponer secretos)
-const missing = []
-if (!API_SECRET) missing.push('API_SECRET')
-if (!SUPABASE_URL) missing.push('SUPABASE_URL')
-if (!SUPABASE_SERVICE_ROLE_KEY) missing.push('SUPABASE_SERVICE_ROLE_KEY')
-if (missing.length) {
-  console.error('Faltan variables en .env:', missing, {
-    hasApiSecret: !!API_SECRET,
-    hasUrl: !!SUPABASE_URL,
-    hasServiceRole: !!SUPABASE_SERVICE_ROLE_KEY,
-    node: process.version,
-  })
-  process.exit(1)
+// CORS (habilitamos Authorization)
+const corsOpts = {
+  origin: true,
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization'],
+  maxAge: 86400,
 }
 
-// Cliente Supabase (usar Service Role SOLO en el backend)
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-
-// --- App ---
 const app = express()
-app.use(cors())
-app.use(express.json())
-app.use(morgan('dev'))
+app.use(cors(corsOpts))
+app.options('*', cors(corsOpts))
+app.use(morgan('tiny'))
 
-// Auth simple por header Authorization: Bearer XXX
+// Supabase (service role para lecturas/joins)
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.error('Faltan vars de entorno de Supabase')
+}
+const supabase = createClient(SUPABASE_URL || '', SUPABASE_SERVICE_ROLE_KEY || '')
+
+// Auth simple por API_SECRET
 function requireAuth(req, res, next) {
-  const auth = req.headers.authorization || ''
+  const auth = req.headers['authorization'] || ''
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
-  if (token !== API_SECRET) return res.status(401).json({ error: 'Unauthorized' })
+  if (!token || token !== API_SECRET) return res.status(401).json({ error: 'Unauthorized' })
   next()
 }
 
-// Health
-app.get('/health', (req, res) => {
-  res.json({ ok: true, uptime_s: process.uptime(), node: process.version })
-})
+// --- util fechas (ventana por días, cierre a medianoche)
+function windowRange(days) {
+  const now = new Date()
+  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+  const from = new Date(tomorrow.getTime() - days*24*60*60*1000)
+  const fromStr = from.toISOString().slice(0,10)
+  const toStr   = tomorrow.toISOString().slice(0,10)
+  return { fromStr, toStr, fromMs: +new Date(fromStr), toMs: +new Date(toStr) }
+}
 
-// Ver envs (sin exponer secretos) para debug rápido
-app.get('/env-check', (req, res) => {
+// --- health/env
+app.get('/health', (_req, res) => res.json({ ok: true }))
+app.get('/env-check', (_req, res) => {
   res.json({
     ok: true,
     hasApiSecret: !!API_SECRET,
@@ -59,307 +59,135 @@ app.get('/env-check', (req, res) => {
   })
 })
 
-// KPIs básicos (últimos 30 días)
-app.get('/kpis', requireAuth, async (req, res) => {
-  try {
-    const today = new Date()
-    const from = new Date(today)
-    from.setDate(from.getDate() - 30)
-    const fromStr = from.toISOString().slice(0, 10) // YYYY-MM-DD
-    const toStr = today.toISOString().slice(0, 10)
-
-    // Ventas (sales_raw) cuenta de filas en rango
-    const { count: salesCount, error: salesErr } = await supabase
-      .from('sales_raw')
-      .select('*', { count: 'exact', head: true })
-      .gte('date', fromStr)
-      .lte('date', toStr)
-    if (salesErr) throw salesErr
-
-    // Visitas (visits_raw) suma de visitas
-    const { data: visitsRows, error: visitsErr } = await supabase
-      .from('visits_raw')
-      .select('visits, date')
-      .gte('date', fromStr)
-      .lte('date', toStr)
-      .limit(100000)
-    if (visitsErr) throw visitsErr
-    const totalVisits = (visitsRows || []).reduce((acc, r) => acc + (Number(r.visits) || 0), 0)
-
-    // Conversión simple (ventas / visitas)
-    const conversion = totalVisits > 0 ? salesCount / totalVisits : 0
-
-    res.json({
-      range: { from: fromStr, to: toStr },
-      sales_30d: salesCount || 0,
-      visits_30d: totalVisits,
-      conv_30d: Number(conversion.toFixed(4))
-    })
-  } catch (err) {
-    console.error('Error /kpis:', err)
-    res.status(500).json({ error: 'KPIs error' })
-  }
-})
-
-// Ventas diarias
-app.get('/sales/daily', requireAuth, async (req, res) => {
-  try {
-    const from = req.query.from || new Date(Date.now() - 30*24*3600*1000).toISOString().slice(0,10)
-    const to = req.query.to || new Date().toISOString().slice(0,10)
-
-    const { data, error } = await supabase
-      .from('sales_raw')
-      .select('date, item_id')
-      .gte('date', from)
-      .lte('date', to)
-    if (error) throw error
-
-    const map = new Map()
-    for (const row of data || []) {
-      const d = row.date
-      map.set(d, (map.get(d) || 0) + 1)
-    }
-    const out = Array.from(map.entries())
-      .sort((a,b) => a[0].localeCompare(b[0]))
-      .map(([date, orders]) => ({ date, orders }))
-    res.json({ from, to, rows: out })
-  } catch (err) {
-    console.error('Error /sales/daily:', err)
-    res.status(500).json({ error: 'sales error' })
-  }
-})
-
-// Visitas diarias
-app.get('/visits/daily', requireAuth, async (req, res) => {
-  try {
-    const from = req.query.from || new Date(Date.now() - 30*24*3600*1000).toISOString().slice(0,10)
-    const to = req.query.to || new Date().toISOString().slice(0,10)
-
-    const { data, error } = await supabase
-      .from('visits_raw')
-      .select('date, visits')
-      .gte('date', from)
-      .lte('date', to)
-      .limit(100000)
-    if (error) throw error
-
-    const map = new Map()
-    for (const row of data || []) {
-      const d = row.date
-      map.set(d, (map.get(d) || 0) + (Number(row.visits) || 0))
-    }
-    const out = Array.from(map.entries())
-      .sort((a,b) => a[0].localeCompare(b[0]))
-      .map(([date, visits]) => ({ date, visits }))
-    res.json({ from, to, rows: out })
-  } catch (err) {
-    console.error('Error /visits/daily:', err)
-    res.status(500).json({ error: 'visits error' })
-  }
-})
-
-// Stock FULL actual (SIN fecha): lee full_stock_min y NO usa 'date'
-app.get('/stock/full', requireAuth, async (req, res) => {
+// --- stock FULL (devuelve {rows: [...]}, como espera tu front)
+app.get('/stock/full', requireAuth, async (_req, res) => {
   try {
     const { data, error } = await supabase
       .from('full_stock_min')
-      .select('inventory_id,item_id,title,available_quantity,total,updated_at,created_at')
-      .limit(100000)
-
+      .select('*') // dejamos comodín para no romper si faltan columnas
     if (error) throw error
-
-    const rows = (data || []).map(r => ({
-      inventory_id: String(r.inventory_id ?? ''),
-      item_id:      String(r.item_id ?? ''),
-      title:        String(r.title ?? ''),
-      qty:          Number(r.available_quantity ?? r.total ?? 0),
-      date:         null // opcional: dejamos null explícito, así jamás rompe
-    }))
-
-    return res.json({ count: rows.length, rows })
+    res.json({ rows: data || [] })
   } catch (err) {
     console.error('Error /stock/full:', err)
-    return res.status(500).json({ error: 'stock error', detail: String(err?.message || err) })
+    res.status(500).json({ error: String(err?.message || err) })
   }
 })
 
-
-
-
-
-
-// --- Full – Decisiones (V3: suma semáforo de almacenamiento)
+// --- decisiones FULL (V3: stock + ventas/visitas + semáforos)
 app.get('/full/decisions', requireAuth, async (req, res) => {
   try {
-    const windowDays  = parseInt(req.query.window ?? '30', 10);      // 30 o 60
-    const leadTime    = parseInt(req.query.lead_time ?? '7', 10);    // días de reposición
-    const storageDays = parseInt(req.query.storage_days ?? '60', 10);
-    const nearMargin  = parseInt(req.query.near_margin ?? '15', 10); // “cerca” = 60-15 = 45
+    const windowDays  = parseInt(req.query.window ?? '30', 10)  // 30 o 60
+    const leadTime    = parseInt(req.query.lead_time ?? '7', 10)
+    const storageDays = parseInt(req.query.storage_days ?? '60', 10)
+    const nearMargin  = parseInt(req.query.near_margin ?? '15', 10)
 
-    // Fechas (día cerrado)
-    const now = new Date();
-    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-    const fromDate = new Date(tomorrow.getTime() - windowDays * 24 * 60 * 60 * 1000);
-    const fromStr = fromDate.toISOString().slice(0, 10);
-    const toStr   = tomorrow.toISOString().slice(0, 10);
+    const { fromStr, toStr, fromMs, toMs } = windowRange(windowDays)
 
-    // 1) Stock FULL
+    // 1) Stock
     const { data: stockRows, error: stockErr } = await supabase
       .from('full_stock_min')
-      .select('item_id,title,available_quantity,total,updated_at');
-    if (stockErr) throw stockErr;
+      .select('item_id,title,available_quantity,total,updated_at')
+    if (stockErr) throw stockErr
 
-    // 2) Visitas (filtramos en Node)
+    // 2) Visitas (sumamos en Node)
     const { data: vRows, error: vErr } = await supabase
       .from('visits_raw')
-      .select('item_id, visits, date');
-    if (vErr) throw vErr;
+      .select('item_id, visits, date')
+    if (vErr) throw vErr
 
     // 3) Ventas (sumatoria + última venta)
     const { data: sRows, error: sErr } = await supabase
       .from('sales_raw')
-      .select('item_id, quantity, date, created_at');
-    if (sErr) throw sErr;
+      .select('item_id, quantity, date, created_at')
+    if (sErr) throw sErr
 
-    const fromMs = new Date(fromStr).getTime();
-    const toMs   = new Date(toStr).getTime();
-
-    const visitsByItem = {};
-    (vRows || []).forEach(r => {
-      const k = String(r?.item_id ?? '');
-      const d = r?.date ? new Date(r.date).getTime() : null;
-      const n = Number(r?.visits ?? 0);
-      if (!k) return;
-      if (d !== null && d >= fromMs && d < toMs) {
-        visitsByItem[k] = (visitsByItem[k] || 0) + (Number.isFinite(n) ? n : 0);
+    const visitsByItem = {}
+    for (const r of vRows || []) {
+      const k = String(r?.item_id ?? '')
+      if (!k) continue
+      const t = r?.date ? +new Date(r.date) : null
+      const n = Number(r?.visits ?? 0)
+      if (t !== null && t >= fromMs && t < toMs) {
+        visitsByItem[k] = (visitsByItem[k] || 0) + (Number.isFinite(n) ? n : 0)
       }
-    });
+    }
 
-    const salesByItem = {};
-    const lastSaleTsByItem = {};
-    (sRows || []).forEach(r => {
-      const k = String(r?.item_id ?? '');
-      if (!k) return;
-      const whenStr = r?.date || r?.created_at || null;
-      const when = whenStr ? new Date(whenStr).getTime() : null;
-
-      const qRaw = r?.quantity;
-      const q = Number.isFinite(Number(qRaw)) && Number(qRaw) > 0 ? Number(qRaw) : 1;
-
+    const salesByItem = {}
+    const lastSaleTsByItem = {}
+    for (const r of sRows || []) {
+      const k = String(r?.item_id ?? '')
+      if (!k) continue
+      const whenStr = r?.date || r?.created_at || null
+      const when = whenStr ? +new Date(whenStr) : null
+      const qRaw = r?.quantity
+      const q = Number.isFinite(Number(qRaw)) && Number(qRaw) > 0 ? Number(qRaw) : 1
       if (when !== null && when >= fromMs && when < toMs) {
-        salesByItem[k] = (salesByItem[k] || 0) + q;
+        salesByItem[k] = (salesByItem[k] || 0) + q
       }
       if (when !== null) {
-        if (!lastSaleTsByItem[k] || when > lastSaleTsByItem[k]) {
-          lastSaleTsByItem[k] = when;
-        }
+        if (!lastSaleTsByItem[k] || when > lastSaleTsByItem[k]) lastSaleTsByItem[k] = when
       }
-    });
+    }
 
     const items = (stockRows || []).map(r => {
-      const itemId = String(r?.item_id || '');
-      const title  = r?.title || '';
-      const stock  = Number(r?.available_quantity ?? r?.total ?? 0) || 0;
+      const item_id = String(r?.item_id || '')
+      const title   = r?.title || ''
+      const stock   = Number(r?.available_quantity ?? r?.total ?? 0) || 0
 
-      const ventas_nd  = Number(salesByItem[itemId] || 0);
-      const visitas_nd = Number(visitsByItem[itemId] || 0);
-      const conv_nd    = visitas_nd > 0 ? (ventas_nd / visitas_nd) : 0;
+      const ventas_nd  = Number(salesByItem[item_id] || 0)
+      const visitas_nd = Number(visitsByItem[item_id] || 0)
+      const conv_nd    = visitas_nd > 0 ? (ventas_nd / visitas_nd) : 0
+      const demanda_diaria = ventas_nd > 0 ? (ventas_nd / windowDays) : 0
 
-      const demanda_diaria = ventas_nd > 0 ? (ventas_nd / windowDays) : 0;
-
-      let days_coverage = null;
-      let break_date = null;
-      let stock_flag = 'ok'; // 'risk' | 'warn' | 'ok'
+      let days_coverage = null
+      let break_date = null
+      let stock_flag = 'ok'
       if (demanda_diaria > 0) {
-        days_coverage = stock / demanda_diaria;
-        if (days_coverage <= leadTime) {
-          stock_flag = 'risk';
-        } else if (days_coverage <= 2 * leadTime) {
-          stock_flag = 'warn';
-        } else {
-          stock_flag = 'ok';
-        }
-        const breakMs = Date.now() + Math.floor(days_coverage) * 24 * 60 * 60 * 1000;
-        break_date = new Date(breakMs).toISOString().slice(0, 10);
+        days_coverage = stock / demanda_diaria
+        if (days_coverage <= leadTime) stock_flag = 'risk'
+        else if (days_coverage <= 2 * leadTime) stock_flag = 'warn'
+        const breakMs = Date.now() + Math.floor(days_coverage) * 86400000
+        break_date = new Date(breakMs).toISOString().slice(0,10)
       }
 
-      // almacenamiento: días desde última venta
-      const lastSaleTs = lastSaleTsByItem[itemId] || null;
-      const last_sale_date = lastSaleTs ? new Date(lastSaleTs).toISOString() : null;
-      const days_since_last_sale = lastSaleTs
-        ? Math.floor((Date.now() - lastSaleTs) / (24 * 60 * 60 * 1000))
-        : null;
+      const lastTs = lastSaleTsByItem[item_id] || null
+      const last_sale_date = lastTs ? new Date(lastTs).toISOString() : null
+      const days_since_last_sale = lastTs ? Math.floor((Date.now() - lastTs)/86400000) : null
 
-      let storage_flag = 'ok'; // 'risk' | 'near' | 'ok'
+      let storage_flag = 'ok'
       if (days_since_last_sale !== null) {
-        if (days_since_last_sale >= storageDays) {
-          storage_flag = 'risk';
-        } else if (days_since_last_sale >= Math.max(0, storageDays - nearMargin)) {
-          storage_flag = 'near';
-        }
-      } // si no hay historial de ventas, lo dejamos 'ok'
-
-      // bandera combinada para ordenar/filtrar fácil en el front
-      let overall_flag = 'ok'; // 'risk' | 'warn' | 'ok'
-      if (storage_flag === 'risk' || stock_flag === 'risk') {
-        overall_flag = 'risk';
-      } else if (stock_flag === 'warn' || storage_flag === 'near') {
-        overall_flag = 'warn';
+        if (days_since_last_sale >= storageDays) storage_flag = 'risk'
+        else if (days_since_last_sale >= Math.max(0, storageDays - nearMargin)) storage_flag = 'near'
       }
 
-      const targetStock = 2 * leadTime * demanda_diaria; // objetivo: 2× lead time
-      const suggested_send = Math.max(0, Math.ceil(targetStock - stock));
+      let overall_flag = 'ok'
+      if (storage_flag === 'risk' || stock_flag === 'risk') overall_flag = 'risk'
+      else if (stock_flag === 'warn' || storage_flag === 'near') overall_flag = 'warn'
+
+      const targetStock = 2 * leadTime * demanda_diaria
+      const suggested_send = Math.max(0, Math.ceil(targetStock - stock))
 
       return {
-        item_id: itemId,
-        title,
-        stock_full: stock,
-        ventas_nd,
-        visitas_nd,
-        conv_nd,               // 0–1 (mostrás % en el front)
-        demanda_diaria,
-        days_coverage,         // null = “∞”
-        break_date,
-        last_sale_date,
-        days_since_last_sale,
-        stock_flag,            // semáforo de stock
-        storage_flag,          // semáforo de almacenamiento (rojo/near/ok)
-        overall_flag,          // combinado para ordenar/filtrar simple
+        item_id, title, stock_full: stock,
+        ventas_nd, visitas_nd, conv_nd,
+        demanda_diaria, days_coverage, break_date,
+        last_sale_date, days_since_last_sale,
+        stock_flag, storage_flag, overall_flag,
         suggested_send,
-        window: windowDays,
-        lead_time: leadTime,
-        storage_days: storageDays,
-        near_margin: nearMargin,
+        window: windowDays, lead_time: leadTime,
+        storage_days: storageDays, near_margin: nearMargin,
         updated_at: r?.updated_at || null,
-      };
-    });
+      }
+    })
 
-    res.json({ ok: true, count: items.length, items, from: fromStr, to: toStr });
+    res.json({ ok: true, count: items.length, items, from: fromStr, to: toStr })
   } catch (err) {
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
-  }
-});
-
-
-
-
-
-
-
-// Test conexión a Supabase
-app.get('/ping-supa', requireAuth, async (req, res) => {
-  try {
-    const candidates = ['visits_raw', 'sales_raw', 'full_stock_min']
-    for (const t of candidates) {
-      const { error } = await supabase.from(t).select('*', { head: true, count: 'exact' }).limit(1)
-      if (!error) return res.json({ ok: true, table: t })
-    }
-    res.status(500).json({ ok: false, error: 'No pude leer tablas candidatas' })
-  } catch (err) {
+    console.error('Error /full/decisions:', err)
     res.status(500).json({ ok: false, error: String(err?.message || err) })
   }
 })
 
+// ---- start
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`API lista en http://localhost:${PORT}`)
 })
