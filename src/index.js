@@ -184,6 +184,73 @@ app.get('/stock/full', requireAuth, async (req, res) => {
 })
 
 
+// --- Full – Decisiones (v1: solo stock, listo para sumar ventas/visitas en Paso 2)
+app.get('/full/decisions', requireAuth, async (req, res) => {
+  try {
+    const windowDays   = parseInt(req.query.window ?? '30', 10);     // 30 o 60
+    const leadTime     = parseInt(req.query.lead_time ?? '7', 10);   // días de reposición
+    const storageDays  = parseInt(req.query.storage_days ?? '60', 10); // ML cobra a los 60 días sin ventas
+    const nearMargin   = parseInt(req.query.near_margin ?? '15', 10);  // “cerca” = 60-15 = 45 días
+
+    // 1) Traer stock FULL por item
+    const { data: stockRows, error } = await supabase
+      .from('full_stock_min')
+      .select('item_id,title,available_quantity,total,updated_at');
+
+    if (error) throw error;
+
+    // 2) Formar respuesta (v1: ventas/visitas se agregan en el Paso 2)
+    const items = (stockRows || []).map(r => {
+      const stock = Number(r?.available_quantity ?? r?.total ?? 0) || 0;
+
+      // placeholders (se completan en el Paso 2)
+      const ventas_nd = 0;
+      const visitas_nd = 0;
+      const conv_nd = 0;                 // 0–1 (el front mostrará %)
+      const demanda_diaria = 0;          // ventas_nd / windowDays
+      const days_coverage = null;        // con demanda 0 mostramos "∞" en el front
+      const break_date = null;
+
+      // semáforos (provisorios: sin demanda es "ok" para stock; storage lo sumamos en Paso 3)
+      const stock_flag = 'ok';           // 'risk' | 'warn' | 'ok'
+      const last_sale_date = null;       // Paso 3
+      const days_since_last_sale = null; // Paso 3
+      const storage_flag = 'ok';         // 'risk' | 'near' | 'ok' (Paso 3)
+
+      const suggested_send = 0;          // Paso 2 (cuando tengamos demanda)
+
+      return {
+        item_id: String(r.item_id || ''),
+        title: r.title || '',
+        stock_full: stock,
+        ventas_nd,
+        visitas_nd,
+        conv_nd,
+        demanda_diaria,
+        days_coverage,
+        break_date,
+        last_sale_date,
+        days_since_last_sale,
+        stock_flag,
+        storage_flag,
+        suggested_send,
+        // eco de parámetros para facilitar debug en el front
+        window: windowDays,
+        lead_time: leadTime,
+        storage_days: storageDays,
+        near_margin: nearMargin,
+        updated_at: r.updated_at || null,
+      };
+    });
+
+    res.json({ ok: true, count: items.length, items });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+
+
 
 // Test conexión a Supabase
 app.get('/ping-supa', requireAuth, async (req, res) => {
