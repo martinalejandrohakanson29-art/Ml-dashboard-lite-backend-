@@ -10,6 +10,28 @@ const API_SECRET = process.env.API_SECRET
 const SUPABASE_URL = process.env.SUPABASE_URL
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
 
+
+// ---- Parser de fechas robusto (ISO o DD/MM/YYYY)
+function parseDateToMs(s) {
+  if (!s) return null;
+  const t = +new Date(s);
+  if (!Number.isNaN(t)) return t; // ya es ISO u otro formato parseable por JS
+
+  // dd/mm/yyyy o d/m/yyyy
+  const m = String(s).match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (m) {
+    const d = parseInt(m[1], 10);
+    const mo = parseInt(m[2], 10) - 1; // 0..11
+    const y = parseInt(m[3], 10);
+    const dt = new Date(y, mo, d);
+    return +dt;
+  }
+  return null; // no reconocida
+}
+
+
+
+
 // CORS (habilitamos Authorization)
 const corsOpts = {
   origin: true,
@@ -73,120 +95,128 @@ app.get('/stock/full', requireAuth, async (_req, res) => {
   }
 })
 
-// --- decisiones FULL (V3: stock + ventas/visitas + semáforos)
-app.get('/full/decisions', requireAuth, async (req, res) => {
+
+
+
+// --- FULL: decisiones de reposición (ventas/visitas últimos N días)
+app.get('/full/decisions', async (req, res) => {
   try {
-    const windowDays  = parseInt(req.query.window ?? '30', 10)  // 30 o 60
-    const leadTime    = parseInt(req.query.lead_time ?? '7', 10)
-    const storageDays = parseInt(req.query.storage_days ?? '60', 10)
-    const nearMargin  = parseInt(req.query.near_margin ?? '15', 10)
+    // Parámetros
+    const windowDays = Math.max(1, parseInt(String(req.query.window || '30'), 10));
+    const leadDays   = Math.max(1, parseInt(String(req.query.lead_time || '7'), 10));
 
-    const { fromStr, toStr, fromMs, toMs } = windowRange(windowDays)
+    const nowMs  = Date.now();
+    const toMs   = nowMs;                                  // hoy
+    const fromMs = nowMs - windowDays * 24 * 60 * 60 * 1000; // hoy - ventana
 
-    // 1) Stock
-    const { data: stockRows, error: stockErr } = await supabase
+    const toStr   = new Date(toMs).toISOString().slice(0,10);
+    const fromStr = new Date(fromMs).toISOString().slice(0,10);
+
+    // 1) Stock FULL (base de items que evaluamos)
+    const { data: fRows, error: fErr } = await supabase
       .from('full_stock_min')
-      .select('item_id,title,available_quantity,total,updated_at')
-    if (stockErr) throw stockErr
+      .select('*');
+    if (fErr) throw fErr;
 
-    // 2) Visitas (sumamos en Node)
+    // 2) Visitas (sumar dentro de ventana)
     const { data: vRows, error: vErr } = await supabase
       .from('visits_raw')
-      .select('item_id, visits, date')
-    if (vErr) throw vErr
+      .select('*');
+    if (vErr) throw vErr;
 
-  // 3) Ventas (sumatoria + última venta) — defensivo
-const { data: sRows, error: sErr } = await supabase
-  .from('sales_raw')
-  .select('*'); // no referenciamos columnas que quizás no existen
-if (sErr) throw sErr;
+    // 3) Ventas (sumar dentro de ventana; defensivo con cantidad)
+    const { data: sRows, error: sErr } = await supabase
+      .from('sales_raw')
+      .select('*'); // ¡no referenciamos columnas que quizás no existen!
+    if (sErr) throw sErr;
 
+    // --- Mapas auxiliares
+    const stockByItem = {};   // item_id -> {stock, title, inventory_id}
+    for (const r of fRows || []) {
+      const itemId = String(r?.item_id ?? r?.ml_item_id ?? r?.ml_id ?? '').trim();
+      if (!itemId) continue;
+      const qty = Number(r?.qty ?? r?.available_quantity ?? r?.available ?? r?.total ?? 0);
+      stockByItem[itemId] = {
+        stock: Number.isFinite(qty) ? qty : 0,
+        title: String(r?.title ?? r?.item_title ?? r?.name ?? ''),
+        inventory_id: String(r?.inventory_id ?? r?.inventoryId ?? '')
+      };
+    }
 
-    const visitsByItem = {}
+    const visitsByItem = {};  // item_id -> total visitas en ventana
     for (const r of vRows || []) {
-      const k = String(r?.item_id ?? '')
-      if (!k) continue
-      const t = r?.date ? +new Date(r.date) : null
-      const n = Number(r?.visits ?? 0)
-      if (t !== null && t >= fromMs && t < toMs) {
-        visitsByItem[k] = (visitsByItem[k] || 0) + (Number.isFinite(n) ? n : 0)
-      }
+      const itemId = String(r?.item_id ?? '').trim();
+      if (!itemId) continue;
+      const whenStr = r?.date || r?.created_at || null;
+      const t = parseDateToMs(whenStr);
+      if (t === null || t < fromMs || t >= toMs) continue;
+      const add = Number(r?.visits ?? r?.count ?? 0);
+      visitsByItem[itemId] = (visitsByItem[itemId] || 0) + (Number.isFinite(add) ? add : 0);
     }
 
-    const salesByItem = {}
-    const lastSaleTsByItem = {}
+    const salesByItem = {};   // item_id -> total ventas (unidades) en ventana
     for (const r of sRows || []) {
-      const k = String(r?.item_id ?? '')
-      if (!k) continue
-      const whenStr = r?.date || r?.created_at || null
-      const when = whenStr ? +new Date(whenStr) : null
-      const qRaw = (r?.quantity ?? r?.qty ?? r?.units ?? r?.count ?? 1);
-const q = Number.isFinite(Number(qRaw)) && Number(qRaw) > 0 ? Number(qRaw) : 1;
-      if (when !== null && when >= fromMs && when < toMs) {
-        salesByItem[k] = (salesByItem[k] || 0) + q
-      }
-      if (when !== null) {
-        if (!lastSaleTsByItem[k] || when > lastSaleTsByItem[k]) lastSaleTsByItem[k] = when
-      }
+      const itemId = String(r?.item_id ?? '').trim();
+      if (!itemId) continue;
+      const whenStr = r?.date || r?.created_at || null;
+      const t = parseDateToMs(whenStr);
+      if (t === null || t < fromMs || t >= toMs) continue;
+
+      // Defensivo: cantidad puede llamarse de varias formas o no existir
+      const rawQ = (r?.quantity ?? r?.qty ?? r?.units ?? r?.count ?? 1);
+      const q = Number.isFinite(Number(rawQ)) && Number(rawQ) > 0 ? Number(rawQ) : 1;
+      salesByItem[itemId] = (salesByItem[itemId] || 0) + q;
     }
 
-    const items = (stockRows || []).map(r => {
-      const item_id = String(r?.item_id || '')
-      const title   = r?.title || ''
-      const stock   = Number(r?.available_quantity ?? r?.total ?? 0) || 0
+    // --- Armar salida
+    const items = [];
+    for (const itemId of Object.keys(stockByItem)) {
+      const base = stockByItem[itemId];
+      const stock  = base.stock || 0;
+      const sales  = salesByItem[itemId]  || 0;
+      const visits = visitsByItem[itemId] || 0;
 
-      const ventas_nd  = Number(salesByItem[item_id] || 0)
-      const visitas_nd = Number(visitsByItem[item_id] || 0)
-      const conv_nd    = visitas_nd > 0 ? (ventas_nd / visitas_nd) : 0
-      const demanda_diaria = ventas_nd > 0 ? (ventas_nd / windowDays) : 0
+      const conv = visits > 0 ? (sales / visits) : 0;                 // tasa de conversión (0..1)
+      const demandPerDay = windowDays > 0 ? (sales / windowDays) : 0; // ventas/día
+      const coverageDays = demandPerDay > 0 ? (stock / demandPerDay) : Infinity; // días que cubre el stock
 
-      let days_coverage = null
-      let break_date = null
-      let stock_flag = 'ok'
-      if (demanda_diaria > 0) {
-        days_coverage = stock / demanda_diaria
-        if (days_coverage <= leadTime) stock_flag = 'risk'
-        else if (days_coverage <= 2 * leadTime) stock_flag = 'warn'
-        const breakMs = Date.now() + Math.floor(days_coverage) * 86400000
-        break_date = new Date(breakMs).toISOString().slice(0,10)
-      }
+      items.push({
+        item_id: itemId,
+        title: base.title,
+        inventory_id: base.inventory_id,
+        stock,
 
-      const lastTs = lastSaleTsByItem[item_id] || null
-      const last_sale_date = lastTs ? new Date(lastTs).toISOString() : null
-      const days_since_last_sale = lastTs ? Math.floor((Date.now() - lastTs)/86400000) : null
+        sales,
+        visits,
+        conv,                // proporción (ej: 0.05 = 5%)
+        demand_per_day: demandPerDay,
+        coverage_days: coverageDays,
 
-      let storage_flag = 'ok'
-      if (days_since_last_sale !== null) {
-        if (days_since_last_sale >= storageDays) storage_flag = 'risk'
-        else if (days_since_last_sale >= Math.max(0, storageDays - nearMargin)) storage_flag = 'near'
-      }
+        // por si el front lo quiere mostrar
+        window_days: windowDays,
+        lead_time_days: leadDays,
+        from: fromStr,
+        to: toStr,
+      });
+    }
 
-      let overall_flag = 'ok'
-      if (storage_flag === 'risk' || stock_flag === 'risk') overall_flag = 'risk'
-      else if (stock_flag === 'warn' || storage_flag === 'near') overall_flag = 'warn'
+    // Orden sugerido: menor cobertura primero
+    items.sort((a,b) => {
+      const ax = Number.isFinite(a.coverage_days) ? a.coverage_days : 1e12;
+      const bx = Number.isFinite(b.coverage_days) ? b.coverage_days : 1e12;
+      return ax - bx;
+    });
 
-      const targetStock = 2 * leadTime * demanda_diaria
-      const suggested_send = Math.max(0, Math.ceil(targetStock - stock))
-
-      return {
-        item_id, title, stock_full: stock,
-        ventas_nd, visitas_nd, conv_nd,
-        demanda_diaria, days_coverage, break_date,
-        last_sale_date, days_since_last_sale,
-        stock_flag, storage_flag, overall_flag,
-        suggested_send,
-        window: windowDays, lead_time: leadTime,
-        storage_days: storageDays, near_margin: nearMargin,
-        updated_at: r?.updated_at || null,
-      }
-    })
-
-    res.json({ ok: true, count: items.length, items, from: fromStr, to: toStr })
+    res.json({ ok: true, count: items.length, items, from: fromStr, to: toStr });
   } catch (err) {
-    console.error('Error /full/decisions:', err)
-    res.status(500).json({ ok: false, error: String(err?.message || err) })
+    console.error('Error /full/decisions:', err);
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
-})
+});
+
+
+
+
 
 // ---- start
 app.listen(PORT, '0.0.0.0', () => {
