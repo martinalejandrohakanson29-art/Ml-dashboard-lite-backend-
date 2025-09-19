@@ -262,6 +262,90 @@ if (String(req.query.debug || '') === '1') {
 });
 
 
+// DEBUG profundo: cruce de tablas sin filtrar por ventana
+app.get('/full/decisions/debug2', requireAuth, async (req, res) => {
+  try {
+    // traigo todo lo justo (sin dobles select)
+    const { data: fRows, error: fErr } = await supabase.from('full_stock_min').select('item_id,title,total,inventory_id');
+    if (fErr) throw fErr;
+    const { data: vRows, error: vErr } = await supabase.from('visits_raw').select('item_id,date,visits');
+    if (vErr) throw vErr;
+    const { data: sRows, error: sErr } = await supabase.from('sales_raw').select('*');
+    if (sErr) throw sErr;
+
+    // sets de IDs
+    const stockIds  = new Set((fRows||[]).map(r => String(r?.item_id||'').trim()));
+    const visitIds  = new Set((vRows||[]).map(r => String(r?.item_id||'').trim()));
+    const salesIds  = new Set((sRows||[]).map(r => String(r?.item_id||'').trim()));
+
+    // intersecciones
+    const intersectSV = [...stockIds].filter(x => visitIds.has(x));
+    const intersectSS = [...stockIds].filter(x => salesIds.has(x));
+
+    // elegimos un item que esté tanto en stock como en visitas (si existe)
+    const probe = intersectSV[0] || [...stockIds][0] || null;
+
+    // sumas “sin ventana” para el probe
+    let visitsAll = 0, salesAll = 0, visits30d = 0, sales30d = 0;
+    const today = new Date();            // ventana de 30 días alineada a medianoche
+    const to = new Date(today.getFullYear(), today.getMonth(), today.getDate()+1);
+    const from = new Date(to.getTime() - 30*24*60*60*1000);
+
+    for (const r of (vRows||[])) {
+      if (String(r?.item_id||'').trim() !== probe) continue;
+      const t = new Date(r?.date).getTime();
+      const v = Number(r?.visits||0);
+      visitsAll += Number.isFinite(v) ? v : 0;
+      if (t >= +from && t < +to) visits30d += Number.isFinite(v) ? v : 0;
+    }
+    for (const r of (sRows||[])) {
+      if (String(r?.item_id||'').trim() !== probe) continue;
+      const t = new Date(r?.date).getTime();
+      const q = Number(
+        r?.orders ?? r?.quantity ?? r?.qty ?? r?.units ?? r?.count ?? 0
+      );
+      salesAll  += Number.isFinite(q) && q > 0 ? q : 0;
+      if (t >= +from && t < +to) sales30d += (Number.isFinite(q) && q > 0 ? q : 0);
+    }
+
+    // stock para el probe (leyendo 'total' primero)
+    const stockRow = (fRows||[]).find(r => String(r?.item_id||'').trim() === probe) || {};
+    const stock =
+      Number(
+        stockRow?.total ?? stockRow?.qty ?? stockRow?.available_quantity ??
+        stockRow?.available ?? stockRow?.stock ?? stockRow?.available_stock ??
+        stockRow?.quantity ?? 0
+      ) || 0;
+
+    return res.json({
+      ok: true,
+      probe_item_id: probe,
+      counts: {
+        full_stock_min_rows: fRows?.length || 0,
+        visits_rows: vRows?.length || 0,
+        sales_rows: sRows?.length || 0,
+        unique_ids: {
+          stock: stockIds.size, visits: visitIds.size, sales: salesIds.size
+        },
+        intersections: {
+          stock∩visits: intersectSV.length,
+          stock∩sales:  intersectSS.length
+        }
+      },
+      probe_summary: {
+        stock_total_col: stock,
+        visits_all_time: visitsAll,
+        visits_last_30d: visits30d,
+        sales_all_time:  salesAll,
+        sales_last_30d:  sales30d
+      },
+      window_used_30d: { from: from.toISOString().slice(0,10), to: to.toISOString().slice(0,10) }
+    });
+  } catch (err) {
+    console.error('Error /full/decisions/debug2:', err);
+    res.status(500).json({ ok:false, error:String(err?.message||err) });
+  }
+});
 
 
 
