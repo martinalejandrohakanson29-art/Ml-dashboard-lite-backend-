@@ -241,29 +241,25 @@ if (String(req.query.debug || '') === '1') {
     visits_rows: vRows?.length || 0,
     sales_rows: sRows?.length || 0,
     unique_ids: {
-      stock: stockIds.size,
-      visits: visitIds.size,
-      sales: salesIds.size,
+      stock: stockIds.size, visits: visitIds.size, sales: salesIds.size
     },
     intersections: {
-      stock_visits: intersectSV.length,   // ← antes: stock∩visits
-      stock_sales:  intersectSS.length,   // ← antes: stock∩sales
-    },
+      stock_visits: intersectSV.length, // <- antes: stock∩visits
+      stock_sales:  intersectSS.length  // <- antes: stock∩sales
+    }
   },
   probe_summary: {
     stock_total_col: stock,
     visits_all_time: visitsAll,
     visits_last_30d: visits30d,
     sales_all_time:  salesAll,
-    sales_last_30d:  sales30d,
+    sales_last_30d:  sales30d
   },
-  window_used_30d: {
-    from: from.toISOString().slice(0,10),
-    to:   to.toISOString().slice(0,10),
-  }
+  window_used_30d: { from: from.toISOString().slice(0,10), to: to.toISOString().slice(0,10) }
 });
-
 }
+
+
 
     
     res.json({ ok: true, count: items.length, items, from: fromStr, to: toStr });
