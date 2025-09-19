@@ -233,24 +233,36 @@ if (String(req.query.debug || '') === '1') {
     .filter(t => t !== null)
     .sort((a,b) => a-b);
 
-  return res.json({
-    ok: true,
-    window: { from: fromStr, to: toStr },
-    counts: {
-      full_stock_min_rows: fRows?.length || 0,
-      visits_rows: vRows?.length || 0,
-      sales_rows: sRows?.length || 0,
-      items_stock: Object.keys(stockByItem).length,
-      items_visits: Object.keys(visitsByItem).length,
-      items_sales: Object.keys(salesByItem).length,
+ return res.json({
+  ok: true,
+  probe_item_id: probe,
+  counts: {
+    full_stock_min_rows: fRows?.length || 0,
+    visits_rows: vRows?.length || 0,
+    sales_rows: sRows?.length || 0,
+    unique_ids: {
+      stock: stockIds.size,
+      visits: visitIds.size,
+      sales: salesIds.size,
     },
-    dates: {
-      visits_min: allDatesV[0] ? new Date(allDatesV[0]).toISOString().slice(0,10) : null,
-      visits_max: allDatesV.at(-1) ? new Date(allDatesV.at(-1)).toISOString().slice(0,10) : null,
-      sales_min: allDatesS[0] ? new Date(allDatesS[0]).toISOString().slice(0,10) : null,
-      sales_max: allDatesS.at(-1) ? new Date(allDatesS.at(-1)).toISOString().slice(0,10) : null,
+    intersections: {
+      stock_visits: intersectSV.length,   // ← antes: stock∩visits
+      stock_sales:  intersectSS.length,   // ← antes: stock∩sales
     },
-  });
+  },
+  probe_summary: {
+    stock_total_col: stock,
+    visits_all_time: visitsAll,
+    visits_last_30d: visits30d,
+    sales_all_time:  salesAll,
+    sales_last_30d:  sales30d,
+  },
+  window_used_30d: {
+    from: from.toISOString().slice(0,10),
+    to:   to.toISOString().slice(0,10),
+  }
+});
+
 }
 
     
