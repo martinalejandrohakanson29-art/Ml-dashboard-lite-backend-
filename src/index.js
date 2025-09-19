@@ -95,11 +95,12 @@ app.get('/full/decisions', requireAuth, async (req, res) => {
       .select('item_id, visits, date')
     if (vErr) throw vErr
 
-    // 3) Ventas (sumatoria + última venta)
-    const { data: sRows, error: sErr } = await supabase
-      .from('sales_raw')
-      .select('item_id, quantity, date, created_at')
-    if (sErr) throw sErr
+  // 3) Ventas (sumatoria + última venta) — defensivo
+const { data: sRows, error: sErr } = await supabase
+  .from('sales_raw')
+  .select('*'); // no referenciamos columnas que quizás no existen
+if (sErr) throw sErr;
+
 
     const visitsByItem = {}
     for (const r of vRows || []) {
@@ -119,8 +120,8 @@ app.get('/full/decisions', requireAuth, async (req, res) => {
       if (!k) continue
       const whenStr = r?.date || r?.created_at || null
       const when = whenStr ? +new Date(whenStr) : null
-      const qRaw = r?.quantity
-      const q = Number.isFinite(Number(qRaw)) && Number(qRaw) > 0 ? Number(qRaw) : 1
+      const qRaw = (r?.quantity ?? r?.qty ?? r?.units ?? r?.count ?? 1);
+const q = Number.isFinite(Number(qRaw)) && Number(qRaw) > 0 ? Number(qRaw) : 1;
       if (when !== null && when >= fromMs && when < toMs) {
         salesByItem[k] = (salesByItem[k] || 0) + q
       }
