@@ -104,7 +104,7 @@ app.get('/stock/full', requireAuth, async (_req, res) => {
 
 
 // --- FULL: decisiones de reposición (ventas/visitas últimos N días)
-app.get('/full/decisions', async (req, res) => {
+app.get('/full/decisions', requireAuth, async (req, res) => {
   try {
     // Parámetros
     const windowDays = Math.max(1, parseInt(String(req.query.window || '30'), 10));
@@ -125,13 +125,13 @@ app.get('/full/decisions', async (req, res) => {
 
     // 2) Visitas (sumar dentro de ventana)
     const { data: vRows, error: vErr } = await supabase
-      .from('visits_raw')
+      .from('visits_raw').select('item_id,date,visits')
       .select('*');
     if (vErr) throw vErr;
 
     // 3) Ventas (sumar dentro de ventana; defensivo con cantidad)
    const { data: sRows, error: sErr } = await supabase
-  .from('sales_raw')
+  .from('sales_raw').select('item_id,date,orders,quantity')
   .select('item_id,date,orders,quantity,ingested_at');
 if (sErr) throw sErr;
 
@@ -161,18 +161,17 @@ if (sErr) throw sErr;
     }
 
     const salesByItem = {};   // item_id -> total ventas (unidades) en ventana
-    for (const r of sRows || []) {
-      const itemId = String(r?.item_id ?? '').trim();
-      if (!itemId) continue;
-      const whenStr = r?.date || r?.created_at || null;
-      const t = parseDateToMs(whenStr);
-      if (t === null || t < fromMs || t >= toMs) continue;
+   for (const r of sRows || []) {
+  const itemId = String(r?.item_id ?? '').trim();
+  if (!itemId) continue;
+  const whenStr = r?.date || r?.created_at || null;
+  const t = parseDateToMs(whenStr);
+  if (t === null || t < fromMs || t >= toMs) continue;
 
-      // Defensivo: cantidad puede llamarse de varias formas o no existir
-      const rawQ = (r?.quantity ?? r?.qty ?? r?.units ?? r?.count ?? 1);
-      const q = Number.isFinite(Number(rawQ)) && Number(rawQ) > 0 ? Number(rawQ) : 1;
-      salesByItem[itemId] = (salesByItem[itemId] || 0) + q;
-    }
+  const q = getSalesQty(r) || 1;   // <-- reemplazo
+  salesByItem[itemId] = (salesByItem[itemId] || 0) + q;
+}
+
 
     // --- Armar salida
     const items = [];
