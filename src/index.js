@@ -55,6 +55,30 @@ app.get('/kpis', requireAuth, (_req, res) => {
   res.json({ ok: true, rows: [] });
 });
 
+
+
+// === FULL: stock mínimo (tabla full_stock_min) ===
+app.get('/full/stock', requireAuth, async (_req, res) => {
+  try {
+    if (!supabase) return res.status(500).json({ ok: false, error: 'Supabase no configurado' });
+
+    // Traemos todas las columnas para evitar errores de nombre (select('*'))
+    const { data, error } = await supabase
+      .from('full_stock_min')
+      .select('*')
+      .order('title', { ascending: true });
+
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    res.json({ ok: true, rows: data || [] });
+  } catch (err) {
+    console.error('GET /full/stock error:', err);
+    res.status(500).json({ ok: false, error: 'Internal error' });
+  }
+});
+
+
+
+
 // 404
 app.use((_req, res) => res.status(404).json({ ok: false, error: 'Not found' }));
 
