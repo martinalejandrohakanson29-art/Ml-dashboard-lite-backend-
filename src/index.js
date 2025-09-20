@@ -23,6 +23,12 @@ function normId(v){
 }
 
 
+  function inWindowDateStr(whenStr, fromStr, toStr) {
+  const d = String(whenStr || '').slice(0,10); // 'YYYY-MM-DD'
+  return d >= fromStr && d < toStr;            // [from, to)
+}
+
+  
   // dd/mm/yyyy o d/m/yyyy
   const m = String(s).match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
   if (m) {
@@ -36,13 +42,25 @@ function normId(v){
 }
 
 function getSalesQty(row){
-  const cands = [row?.orders, row?.quantity, row?.qty, row?.units, row?.count];
-  for (const v of cands){
+  const candidates = [
+    row?.orders,
+    row?.orders_count,
+    row?.quantity,
+    row?.qty,
+    row?.units,
+    row?.count,
+    row?.sold,
+    row?.sold_qty,
+    row?.sold_quantity,
+    row?.sold_units
+  ];
+  for (const v of candidates){
     const n = Number(v);
     if (Number.isFinite(n) && n > 0) return n;
   }
-  return 0; // ← antes terminábamos “creando” 1
+  return 0;
 }
+
 
 
 
@@ -174,7 +192,7 @@ stockByItem[itemId] = {
 
   const whenStr = r?.date || r?.created_at || null;
   const t = parseDateToMs(whenStr);
-  if (t === null || t < fromMs || t >= toMs) continue;
+if (!inWindowDateStr(whenStr, fromStr, toStr)) continue;
 
   const add = Number(r?.visits ?? r?.count ?? 0);
   if (!Number.isFinite(add) || add <= 0) continue;
@@ -187,12 +205,12 @@ stockByItem[itemId] = {
 
   const whenStr = r?.date || r?.created_at || null;
   const t = parseDateToMs(whenStr);
-  if (t === null || t < fromMs || t >= toMs) continue;
+if (!inWindowDateStr(whenStr, fromStr, toStr)) continue;
 
-  const q = getSalesQty(r);   // <-- sin "|| 1"
-  if (q <= 0) continue;       // <-- no inventar 1 por día
-  salesByItem[itemId] = (salesByItem[itemId] || 0) + q;
-}
+const q = getSalesQty(r);
+if (q <= 0) continue;
+salesByItem[itemId] = (salesByItem[itemId] || 0) + q;
+
 
 
     // --- Armar salida
