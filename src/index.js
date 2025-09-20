@@ -76,15 +76,7 @@ function requireAuth(req, res, next) {
   next()
 }
 
-// --- util fechas (ventana por días, cierre a medianoche)
-function windowRange(days) {
-  const now = new Date()
-  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
-  const from = new Date(tomorrow.getTime() - days*24*60*60*1000)
-  const fromStr = from.toISOString().slice(0,10)
-  const toStr   = tomorrow.toISOString().slice(0,10)
-  return { fromStr, toStr, fromMs: +new Date(fromStr), toMs: +new Date(toStr) }
-}
+
 
 // --- health/env
 app.get('/health', (_req, res) => res.json({ ok: true }))
