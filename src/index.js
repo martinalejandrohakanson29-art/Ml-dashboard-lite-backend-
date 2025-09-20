@@ -1,3 +1,18 @@
+// === Imports (ESM) ===
+import express from 'express';
+import cors from 'cors';
+import morgan from 'morgan';
+import { createClient } from '@supabase/supabase-js';
+
+// === ENV ===
+const PORT = process.env.PORT || 10000;
+const API_SECRET = process.env.API_SECRET || '';
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+
+
+
+
 // === Helpers de IDs y fechas (Argentina) ===
 function normId(v){ return String(v ?? '').trim().toUpperCase(); }
 
