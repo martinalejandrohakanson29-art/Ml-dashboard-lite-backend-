@@ -17,6 +17,12 @@ function parseDateToMs(s) {
   const t = +new Date(s);
   if (!Number.isNaN(t)) return t; // ya es ISO u otro formato parseable por JS
 
+  // --- helpers ---
+function normId(v){
+  return String(v ?? '').trim().toUpperCase();
+}
+
+
   // dd/mm/yyyy o d/m/yyyy
   const m = String(s).match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
   if (m) {
@@ -140,7 +146,7 @@ if (sErr) throw sErr;
    // stockByItem (reemplazá el bloque actual)
 const stockByItem = {};
 for (const r of fRows || []) {
-  const itemId = String(r?.item_id ?? r?.ml_item_id ?? r?.ml_id ?? '').trim();
+const itemId = normId(r?.item_id ?? r?.ml_item_id ?? r?.ml_id ?? r?.itemId);
   if (!itemId) continue;
 
  const qtyRaw =
@@ -163,28 +169,29 @@ stockByItem[itemId] = {
 
     const visitsByItem = {};  // item_id -> total visitas en ventana
     for (const r of vRows || []) {
-      const itemId = String(r?.item_id ?? '').trim();
-      if (!itemId) continue;
-      const whenStr = r?.date || r?.created_at || null;
-      const t = parseDateToMs(whenStr);
-      if (t === null || t < fromMs || t >= toMs) continue;
-      const add = Number(r?.visits ?? r?.count ?? 0);
-      visitsByItem[itemId] = (visitsByItem[itemId] || 0) + (Number.isFinite(add) ? add : 0);
-    }
-
-    const salesByItem = {};   // item_id -> total ventas (unidades) en ventana
-   for (const r of sRows || []) {
-  const itemId = String(r?.item_id ?? '').trim();
+  const itemId = normId(r?.item_id ?? r?.ml_item_id ?? r?.ml_id ?? r?.itemId ?? r?.id);
   if (!itemId) continue;
+
   const whenStr = r?.date || r?.created_at || null;
   const t = parseDateToMs(whenStr);
   if (t === null || t < fromMs || t >= toMs) continue;
 
-// dentro del loop de ventas
-const q = getSalesQty(r);
-if (q <= 0) continue;              // ← evita sumar “ventas” inexistentes
-salesByItem[itemId] = (salesByItem[itemId] || 0) + q;
+  const add = Number(r?.visits ?? r?.count ?? 0);
+  if (!Number.isFinite(add) || add <= 0) continue;
+  visitsByItem[itemId] = (visitsByItem[itemId] || 0) + add;
+}
 
+    const salesByItem = {};   // item_id -> total ventas (unidades) en ventana
+  const itemId = normId(r?.item_id ?? r?.ml_item_id ?? r?.ml_id ?? r?.itemId ?? r?.id);
+  if (!itemId) continue;
+
+  const whenStr = r?.date || r?.created_at || null;
+  const t = parseDateToMs(whenStr);
+  if (t === null || t < fromMs || t >= toMs) continue;
+
+  const q = getSalesQty(r);   // <-- sin "|| 1"
+  if (q <= 0) continue;       // <-- no inventar 1 por día
+  salesByItem[itemId] = (salesByItem[itemId] || 0) + q;
 }
 
 
