@@ -1,32 +1,32 @@
-// === Imports (ESM) ===
-import express from 'express';
-import cors from 'cors';
-import morgan from 'morgan';
-import { createClient } from '@supabase/supabase-js';
+// back.js — versión mínima funcional
+import express from 'express'
+import cors from 'cors'
+import morgan from 'morgan'
+import 'dotenv/config'
+import { createClient } from '@supabase/supabase-js'
 
-// === ENV ===
-const PORT = process.env.PORT || 10000;
-const API_SECRET = process.env.API_SECRET || '';
-const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-
-
+const PORT = process.env.PORT || 3000
+const API_SECRET = process.env.API_SECRET
+const SUPABASE_URL = process.env.SUPABASE_URL
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
 
 
-// === Helpers de IDs y fechas (Argentina) ===
+// ---- Parser de fechas robusto (ISO o DD/MM/YYYY)
+function parseDateToMs(s) {
+  if (!s) return null;
+  const t = +new Date(s);
+  if (!Number.isNaN(t)) return t; // ya es ISO u otro formato parseable por JS
+
+  // --- helpers ---
+// helpers (top-level)
 function normId(v){ return String(v ?? '').trim().toUpperCase(); }
 
-// Ventana [from, to) alineada a medianoche local
-function windowRange(days) {
-  const now = new Date();
-  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-  const from = new Date(tomorrow.getTime() - days*24*60*60*1000);
-  const fromStr = from.toISOString().slice(0,10);
-  const toStr   = tomorrow.toISOString().slice(0,10);
-  return { fromStr, toStr, fromMs: +new Date(fromStr), toMs: +new Date(toStr) };
+function inWindowDateStr(whenStr, fromStr, toStr) {
+  const d = String(whenStr || '').slice(0,10); // 'YYYY-MM-DD'
+  return d >= fromStr && d < toStr;            // [from, to)
 }
 
-// Parser robusto (ISO o DD/MM/YYYY)
+// Parser de fechas (solo parsea, no declare helpers aquí)
 function parseDateToMs(s){
   if (!s) return null;
   const t = +new Date(s);
@@ -39,7 +39,6 @@ function parseDateToMs(s){
   return null;
 }
 
-// Intenta obtener "cantidad" desde múltiples campos posibles
 function getSalesQty(row){
   const candidates = [
     row?.orders,
@@ -59,7 +58,6 @@ function getSalesQty(row){
   }
   return 0;
 }
-
 
 
 
@@ -91,7 +89,15 @@ function requireAuth(req, res, next) {
   next()
 }
 
-
+// --- util fechas (ventana por días, cierre a medianoche)
+function windowRange(days) {
+  const now = new Date()
+  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+  const from = new Date(tomorrow.getTime() - days*24*60*60*1000)
+  const fromStr = from.toISOString().slice(0,10)
+  const toStr   = tomorrow.toISOString().slice(0,10)
+  return { fromStr, toStr, fromMs: +new Date(fromStr), toMs: +new Date(toStr) }
+}
 
 // --- health/env
 app.get('/health', (_req, res) => res.json({ ok: true }))
@@ -120,14 +126,14 @@ app.get('/stock/full', requireAuth, async (_req, res) => {
 })
 
 
+
 app.get('/full/decisions', requireAuth, async (req, res) => {
   try {
-    const windowDays    = Math.max(1, Number(req.query.window || 30));   // ej. 30
-    const leadTimeDays  = Math.max(0, Number(req.query.lead_time || 7)); // ej. 7
-    const debug         = String(req.query.debug || '') === '1';
+    const windowDays = Number(req.query.window || 30);
+    const leadTimeDays = Number(req.query.lead_time || 7);
     const { fromStr, toStr } = windowRange(windowDays);
 
-    // --- STOCK (FULL)
+    // --- STOCK
     const { data: fRows, error: fErr } = await supabase
       .from('full_stock_min')
       .select('*');
@@ -145,7 +151,7 @@ app.get('/full/decisions', requireAuth, async (req, res) => {
       stockByItem[itemId] = stock;
     }
 
-    // --- VISITAS (en ventana)
+    // --- VISITAS (filtrado en la query, límite alto)
     const { data: vRows, error: vErr } = await supabase
       .from('visits_raw')
       .select('*')
@@ -164,7 +170,7 @@ app.get('/full/decisions', requireAuth, async (req, res) => {
       visitsByItem[itemId] = (visitsByItem[itemId] || 0) + add;
     }
 
-    // --- VENTAS (en ventana)
+    // --- VENTAS (filtrado en la query, límite alto)
     const { data: sRows, error: sErr } = await supabase
       .from('sales_raw')
       .select('*')
@@ -183,7 +189,7 @@ app.get('/full/decisions', requireAuth, async (req, res) => {
       salesByItem[itemId] = (salesByItem[itemId] || 0) + q;
     }
 
-    // --- COMBINAR Y CALCULAR MÉTRICAS CORRECTAS
+    // --- COMBINAR RESULTADOS
     const itemIds = new Set([
       ...Object.keys(stockByItem),
       ...Object.keys(visitsByItem),
@@ -192,22 +198,20 @@ app.get('/full/decisions', requireAuth, async (req, res) => {
 
     const items = [];
     for (const id of itemIds) {
-      const stock  = stockByItem[id]  || 0;
+      const stock = stockByItem[id] || 0;
       const visits = visitsByItem[id] || 0;
-      const sales  = salesByItem[id]  || 0;
+      const sales = salesByItem[id] || 0;
 
-      const conversion = visits > 0 ? (sales / visits) : 0;           // ventas/visita  (ratio)
-      const sales_per_day = windowDays > 0 ? (sales / windowDays) : 0; // ventas/día     (demanda)
-      const days_coverage = sales_per_day > 0 ? (stock / sales_per_day) : Number.POSITIVE_INFINITY;
+      const demanda_diaria = visits > 0 ? sales / visits : 0;
+      const coverage = demanda_diaria > 0 ? stock / demanda_diaria : 0;
 
       items.push({
         item_id: id,
         stock_full: stock,
         visitas_nd: visits,
         ventas_nd: sales,
-        conversion,           // NUEVO: ratio real
-        demanda_diaria: sales_per_day, // ventas por día (antes mal calculado)
-        days_coverage,        // stock / ventas_día
+        demanda_diaria,
+        days_coverage: coverage,
         window_days: windowDays,
         lead_time_days: leadTimeDays,
         from: fromStr,
@@ -215,55 +219,69 @@ app.get('/full/decisions', requireAuth, async (req, res) => {
       });
     }
 
-    // Orden sugerido: menor cobertura primero
-    items.sort((a,b) => {
-      const ax = Number.isFinite(a.days_coverage) ? a.days_coverage : 1e12;
-      const bx = Number.isFinite(b.days_coverage) ? b.days_coverage : 1e12;
-      return ax - bx;
+    res.json({
+      ok: true,
+      count: items.length,
+      items
     });
-
-    // --- DEBUG opcional: rangos y conteos
-    if (debug) {
-      const allDatesV = (vRows || [])
-        .map(r => parseDateToMs(r?.date || r?.created_at || null))
-        .filter(t => t !== null)
-        .sort((a,b) => a-b);
-
-      const allDatesS = (sRows || [])
-        .map(r => parseDateToMs(r?.date || r?.created_at || null))
-        .filter(t => t !== null)
-        .sort((a,b) => a-b);
-
-      return res.json({
-        ok: true,
-        window: { from: fromStr, to: toStr },
-        counts: {
-          full_stock_min_rows: fRows?.length || 0,
-          visits_rows: vRows?.length || 0,
-          sales_rows: sRows?.length || 0,
-          items_stock: Object.keys(stockByItem).length,
-          items_visits: Object.keys(visitsByItem).length,
-          items_sales: Object.keys(salesByItem).length,
-        },
-        dates: {
-          visits_min: allDatesV[0] ? new Date(allDatesV[0]).toISOString().slice(0,10) : null,
-          visits_max: allDatesV.at(-1) ? new Date(allDatesV.at(-1)).toISOString().slice(0,10) : null,
-          sales_min:  allDatesS[0] ? new Date(allDatesS[0]).toISOString().slice(0,10) : null,
-          sales_max:  allDatesS.at(-1) ? new Date(allDatesS.at(-1)).toISOString().slice(0,10) : null,
-        },
-        items_preview: items.slice(0, 5)
-      });
-    }
-
-    // Respuesta normal
-    return res.json({ ok: true, count: items.length, items });
   } catch (err) {
     console.error('Error /full/decisions:', err);
-    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
 
+
+  // Orden sugerido: menor cobertura primero
+items.sort((a,b) => {
+  const ax = Number.isFinite(a.days_coverage) ? a.days_coverage : 1e12;
+  const bx = Number.isFinite(b.days_coverage) ? b.days_coverage : 1e12;
+  return ax - bx;
+});
+
+
+/* ===== DEBUG OPCIONAL ===== */
+if (String(req.query.debug || '') === '1') {
+  const allDatesV = (vRows || [])
+    .map(r => parseDateToMs(r?.date || r?.created_at || null))
+    .filter(t => t !== null)
+    .sort((a,b) => a-b);
+
+  const allDatesS = (sRows || [])
+    .map(r => parseDateToMs(r?.date || r?.created_at || null))
+    .filter(t => t !== null)
+    .sort((a,b) => a-b);
+
+  return res.json({
+    ok: true,
+    window: { from: fromStr, to: toStr },
+    counts: {
+      full_stock_min_rows: fRows?.length || 0,
+      visits_rows: vRows?.length || 0,
+      sales_rows: sRows?.length || 0,
+      items_stock: Object.keys(stockByItem).length,
+      items_visits: Object.keys(visitsByItem).length,
+      items_sales: Object.keys(salesByItem).length,
+    },
+    dates: {
+      visits_min: allDatesV[0] ? new Date(allDatesV[0]).toISOString().slice(0,10) : null,
+      visits_max: allDatesV.at(-1) ? new Date(allDatesV.at(-1)).toISOString().slice(0,10) : null,
+      sales_min:  allDatesS[0] ? new Date(allDatesS[0]).toISOString().slice(0,10) : null,
+      sales_max:  allDatesS.at(-1) ? new Date(allDatesS.at(-1)).toISOString().slice(0,10) : null,
+    }
+  });
+}
+/* ===== /DEBUG ===== */
+
+
+
+    
+    res.json({ ok: true, count: items.length, items, from: fromStr, to: toStr });
+  } catch (err) {
+    console.error('Error /full/decisions:', err);
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
 
 
 // DEBUG profundo: cruce de tablas sin filtrar por ventana
