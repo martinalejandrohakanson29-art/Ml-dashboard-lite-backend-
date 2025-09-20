@@ -18,27 +18,25 @@ function parseDateToMs(s) {
   if (!Number.isNaN(t)) return t; // ya es ISO u otro formato parseable por JS
 
   // --- helpers ---
-function normId(v){
-  return String(v ?? '').trim().toUpperCase();
-}
+// helpers (top-level)
+function normId(v){ return String(v ?? '').trim().toUpperCase(); }
 
-
-  function inWindowDateStr(whenStr, fromStr, toStr) {
+function inWindowDateStr(whenStr, fromStr, toStr) {
   const d = String(whenStr || '').slice(0,10); // 'YYYY-MM-DD'
   return d >= fromStr && d < toStr;            // [from, to)
 }
 
-  
-  // dd/mm/yyyy o d/m/yyyy
+// Parser de fechas (solo parsea, no declare helpers aquí)
+function parseDateToMs(s){
+  if (!s) return null;
+  const t = +new Date(s);
+  if (!Number.isNaN(t)) return t;
   const m = String(s).match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
   if (m) {
-    const d = parseInt(m[1], 10);
-    const mo = parseInt(m[2], 10) - 1; // 0..11
-    const y = parseInt(m[3], 10);
-    const dt = new Date(y, mo, d);
-    return +dt;
+    const d = parseInt(m[1],10), mo = parseInt(m[2],10)-1, y = parseInt(m[3],10);
+    return +new Date(y, mo, d);
   }
-  return null; // no reconocida
+  return null;
 }
 
 function getSalesQty(row){
@@ -199,17 +197,19 @@ if (!inWindowDateStr(whenStr, fromStr, toStr)) continue;
   visitsByItem[itemId] = (visitsByItem[itemId] || 0) + add;
 }
 
-    const salesByItem = {};   // item_id -> total ventas (unidades) en ventana
+    const salesByItem = {};
+for (const r of sRows || []) {                 // ← faltaba este for
   const itemId = normId(r?.item_id ?? r?.ml_item_id ?? r?.ml_id ?? r?.itemId ?? r?.id);
   if (!itemId) continue;
 
   const whenStr = r?.date || r?.created_at || null;
-  const t = parseDateToMs(whenStr);
-if (!inWindowDateStr(whenStr, fromStr, toStr)) continue;
+  if (!inWindowDateStr(whenStr, fromStr, toStr)) continue; // filtro por string para evitar TZ
 
-const q = getSalesQty(r);
-if (q <= 0) continue;
-salesByItem[itemId] = (salesByItem[itemId] || 0) + q;
+  const q = getSalesQty(r);                    // sin “|| 1”
+  if (q <= 0) continue;                        // no inventar ventas
+  salesByItem[itemId] = (salesByItem[itemId] || 0) + q;
+}
+
 
 
 
