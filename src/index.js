@@ -29,12 +29,15 @@ function parseDateToMs(s) {
   return null; // no reconocida
 }
 
-// Prioriza 'orders' (ventas del día). Si no hay, usa 'quantity'. Si no, 0.
-function getSalesQty(row) {
-  const raw = row?.orders ?? row?.quantity ?? row?.qty ?? row?.units ?? row?.count ?? 0;
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : 0;
+function getSalesQty(row){
+  const cands = [row?.orders, row?.quantity, row?.qty, row?.units, row?.count];
+  for (const v of cands){
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return 0; // ← antes terminábamos “creando” 1
 }
+
 
 
 // CORS (habilitamos Authorization)
@@ -177,8 +180,11 @@ stockByItem[itemId] = {
   const t = parseDateToMs(whenStr);
   if (t === null || t < fromMs || t >= toMs) continue;
 
-  const q = getSalesQty(r) || 1;   // <-- reemplazo
-  salesByItem[itemId] = (salesByItem[itemId] || 0) + q;
+// dentro del loop de ventas
+const q = getSalesQty(r);
+if (q <= 0) continue;              // ← evita sumar “ventas” inexistentes
+salesByItem[itemId] = (salesByItem[itemId] || 0) + q;
+
 }
 
 
@@ -273,8 +279,11 @@ app.get('/full/decisions/debug2', requireAuth, async (req, res) => {
     if (fErr) throw fErr;
     const { data: vRows, error: vErr } = await supabase.from('visits_raw').select('item_id,date,visits');
     if (vErr) throw vErr;
-    const { data: sRows, error: sErr } = await supabase.from('sales_raw').select('*');
-    if (sErr) throw sErr;
+   const { data: sRows, error: sErr } = await supabase
+  .from('sales_raw')
+  .select('*');
+if (sErr) throw sErr;
+
 
     // sets de IDs
     const stockIds  = new Set((fRows||[]).map(r => String(r?.item_id||'').trim()));
