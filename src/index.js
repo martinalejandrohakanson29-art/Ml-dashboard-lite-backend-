@@ -76,6 +76,21 @@ app.get('/full/stock', requireAuth, async (_req, res) => {
   }
 });
 
+// === FULL: KPIs 30d (stock + visitas + órdenes)
+app.get('/full/kpis-30d', requireAuth, async (_req, res) => {
+  try {
+    if (!supabase) return res.status(500).json({ ok: false, error: 'Supabase no configurado' });
+    const { data, error } = await supabase
+      .from('vw_full_kpis_30d') // tu vista
+      .select('*')
+      .order('title', { ascending: true });
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    res.json({ ok: true, rows: data || [] });
+  } catch (err) {
+    console.error('GET /full/kpis-30d error:', err);
+    res.status(500).json({ ok: false, error: 'Internal error' });
+  }
+});
 
 
 
