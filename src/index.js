@@ -93,6 +93,67 @@ app.get('/full/kpis-30d', requireAuth, async (_req, res) => {
 });
 
 
+// === FULL: Plan de reposición (envíos) ===
+// Params (query):
+//   lt: lead time días (default 7)
+//   buffer: días de seguridad (default 3)
+//   cover: cobertura objetivo en días (default 14)
+//   min_opd: piso ventas/día (default 0.1)
+app.get('/full/replenishment-plan', requireAuth, async (req, res) => {
+  const LT      = Number(req.query.lt ?? 7);
+  const BUFFER  = Number(req.query.buffer ?? 3);
+  const COVER   = Number(req.query.cover ?? 14);
+  const MIN_OPD = Number(req.query.min_opd ?? 0.1);
+
+  try {
+    if (!supabase) return res.status(500).json({ ok:false, error:'Supabase no configurado' });
+
+    const { data, error } = await supabase
+      .from('vw_full_kpis_30d_plus')
+      .select('*');
+
+    if (error) return res.status(500).json({ ok:false, error: error.message });
+
+    const rows = (data || []).map(r => {
+      const available = Number(r.available_quantity ?? (r.total - r.not_available_quantity) ?? 0);
+      const opd_raw   = Number(r.orders_per_day_30d || 0);
+      const opd       = Math.max(opd_raw, MIN_OPD);                 // piso
+      const dos       = opd > 0 ? available / opd : Infinity;       // días de cobertura
+      const rop       = opd * (LT + BUFFER);                        // punto de pedido
+      const target    = opd * (LT + COVER);                         // stock objetivo
+      const suggest   = Math.max(0, Math.ceil(target - available)); // envío sugerido
+
+      // semáforo
+      let status = 'green';
+      if (available <= rop) status = 'red';
+      else if (available <= opd * (LT + BUFFER + 7)) status = 'yellow';
+
+      const daysNoSale = Number(r.days_no_sale ?? 0);
+      const stale = daysNoSale >= Math.max(0, 60 - LT); // riesgo 60d sin venta
+
+      return {
+        ...r,
+        opd_raw, opd: Number(opd.toFixed(3)),
+        dos: Number.isFinite(dos) ? Number(dos.toFixed(1)) : null,
+        rop: Math.ceil(rop),
+        target: Math.ceil(target),
+        suggest,
+        status,
+        stale
+      };
+    }).sort((a, b) => {
+      const rank = s => (s==='red'?0 : s==='yellow'?1 : 2);
+      return rank(a.status) - rank(b.status) || (a.dos ?? 1e9) - (b.dos ?? 1e9);
+    });
+
+    res.json({ ok:true, params:{ LT, BUFFER, COVER, MIN_OPD }, rows });
+  } catch (err) {
+    console.error('GET /full/replenishment-plan error:', err);
+    res.status(500).json({ ok:false, error:'Internal error' });
+  }
+});
+
+
 
 // 404
 app.use((_req, res) => res.status(404).json({ ok: false, error: 'Not found' }));
