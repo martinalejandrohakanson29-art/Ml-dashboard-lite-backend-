@@ -117,7 +117,7 @@ app.get('/full/replenishment-plan', requireAuth, async (req, res) => {
     const rows = (data || []).map(r => {
       const available = Number(r.available_quantity ?? (r.total - r.not_available_quantity) ?? 0);
       const opd_raw   = Number(r.orders_per_day_30d || 0);
-      const opd       = Math.max(opd_raw, MIN_OPD);                 // piso
+     const opd = (r.orders_30d > 0) ? opd_raw : MIN_OPD;                // piso
       const dos       = opd > 0 ? available / opd : Infinity;       // días de cobertura
       const rop       = opd * (LT + BUFFER);                        // punto de pedido
       const target    = opd * (LT + COVER);                         // stock objetivo
